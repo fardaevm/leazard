@@ -1,241 +1,349 @@
-# Leazard — AI Lease Risk Analyzer
+<h1 align="center">Leazard</h1>
 
-> Upload a residential lease PDF and get a cited risk report: which clauses are risky, what California / San Francisco law says about them, a 0–10 risk score, and a ready-to-send negotiation email.
+<p align="center">
+  Upload a residential lease before you sign. Get a cited risk report, a 0-10 score, and a ready-to-send negotiation email.
+</p>
 
-Leazard is an end-to-end **LLM application**: a multi-step **LangGraph agent**, a **RAG** pipeline over real tenant law, **grounding checks** that reject hallucinated quotes and citations, an **evaluation suite**, and a **containerized FastAPI service** ready for cloud deployment.
+<p align="center">
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.129-009688?logo=fastapi&logoColor=white">
+  <img alt="LangGraph" src="https://img.shields.io/badge/LangGraph-1.x-1C3C3C">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white">
+</p>
 
-**Built by [Ali Fardaev](https://github.com/fardaevm)** — targeting **AI / ML Engineer** roles.
+<p align="center">
+  <img src="docs/demo.gif" width="760" alt="Demo: a lease PDF is uploaded with ZIP 94110, the analysis steps tick off one by one, and the results page shows a 0.9 out of 10 Low risk score with flagged clauses and a draft email.">
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#how-it-was-built">How it was built</a>
+</p>
 
 ---
 
-## For Recruiters — at a Glance
+## What is Leazard?
 
-| What a hiring manager looks for | Where it shows up in Leazard |
+Most renters sign a lease they can't fully evaluate. They don't know which clauses are normal and which could cost them money. Leazard reads the lease for them:
+
+- It **flags risky clauses** and quotes the exact lease text.
+- It **checks each one against tenant law** and cites the source.
+- It **drafts an email** to the landlord about the issues it found.
+
+It is for renters who want a second opinion before signing. Today it supports **San Francisco / California Bay Area** ZIP codes.
+
+*Informational only, not legal advice.*
+
+### Highlights
+
+- **A 5-step LangGraph agent**, not one big prompt. Each step can be tested on its own ([`agent.py`](agent.py)).
+- **Grounded output.** Quotes must appear word for word in the lease. Findings rated above Low need a supporting law citation, or they are capped at Low.
+- **The score is computed in code.** The same findings always give the same score ([`score_flags`](agent.py)).
+- **Tested.** There are 82 offline tests, plus a live "golden lease" test against the real model.
+
+## Tech stack
+
+| Layer | Tools |
 | --- | --- |
-| **LLM orchestration / agents** | 5-node LangGraph state machine with conditional routing, parallel fan-out, timeouts and graceful degradation (`agent.py`) |
-| **Retrieval-Augmented Generation** | PDF → chunking → OpenAI embeddings → FAISS index; top-k retrieval injected per risk category with numbered, traceable citations (`rag/`) |
-| **Hallucination control** | Lease quotes must appear verbatim in the document; citations must overlap with the clause; unsupported "High" findings are automatically downgraded |
-| **Evaluation** | 82 automated tests + a live **golden-set eval** that runs the real model several times and checks score stability and expected findings |
-| **Deterministic scoring** | LLM outputs severities; a reproducible formula (decayed weights, squashed to 0–10, rule-based label floors/caps) produces the score |
-| **Production backend** | FastAPI, JWT auth (bcrypt), SQLite/SQLAlchemy with additive migrations, async background jobs with live progress, upload validation |
-| **MLOps / deployment** | Multi-stage Docker image (155 MB compressed), non-root + read-only filesystem, health checks, persistent volumes, Fly.io / Render configs |
-| **Security & privacy** | Fail-fast secret checks, no lease text in logs, path-traversal guards, per-user data isolation, secrets never baked into images |
+| AI | LangGraph, OpenAI GPT-4o-mini, `text-embedding-3-small` |
+| Retrieval | FAISS (vector index), pdfplumber (PDF text) |
+| Backend | FastAPI, SQLAlchemy, SQLite, JWT + bcrypt |
+| Frontend | Vanilla JavaScript, no build step |
+| Ops | Docker, Fly.io / Render, pytest, Poetry |
 
-**Stack:** Python 3.12 · LangGraph · LangChain · OpenAI (GPT-4o-mini, text-embedding-3-small) · FAISS · FastAPI · SQLAlchemy · pdfplumber · pytest · Docker · Poetry
+## Quick start
 
----
-
-## What It Does
-
-1. User registers, logs in, uploads a lease PDF and a ZIP code.
-2. A background job runs the agent while the UI shows live progress ("Reading your lease" → "Checking California law" → …).
-3. The result page shows:
-   - **Risk score (0–10) and label** (Low / Moderate / High)
-   - **Flagged clauses** with severity, the verbatim lease quote, why it matters, and **citations to the law corpus**
-   - **Standard clauses** recognised as normal (so tenants aren't alarmed by boilerplate)
-   - **Recommendations** and a **negotiation email** to send the landlord
-4. All analyses are saved to the user's history, with the original PDF.
-
----
-
-## Architecture
-
-```mermaid
-flowchart LR
-    UI[Web UI<br/>vanilla JS SPA] -->|JWT| API[FastAPI]
-    API --> JOBS[Background job runner<br/>progress + timeouts]
-    JOBS --> G[LangGraph agent]
-    G --> LLM[OpenAI GPT-4o-mini]
-    G --> RET[Law retriever]
-    RET --> FAISS[(FAISS index)]
-    LAW[CA / SF law PDFs] --> IDX[Indexer<br/>chunk + embed] --> FAISS
-    API --> DB[(SQLite<br/>users · history · jobs)]
-    API --> FS[(Uploaded PDFs)]
-```
-
-### The agent (LangGraph)
-
-```mermaid
-flowchart LR
-    A[validate_zip] -->|in scope| B[extract_structured]
-    A -->|out of scope| END1((end))
-    B --> C[discover_categories]
-    C --> D[analyze_risk<br/>parallel per category]
-    D --> E[draft_letter]
-    E --> END2((end))
-```
-
-| Node | What it does |
-| --- | --- |
-| `validate_zip` | Rejects leases outside the supported region before spending any tokens |
-| `extract_structured` | Splits long leases into overlapping chunks, extracts structured fields in parallel, merges results |
-| `discover_categories` | LLM decides which risk areas *this* lease needs checked — nothing hard-coded |
-| `analyze_risk` | For each category, in parallel: retrieve relevant law → LLM flags clauses → **verify quotes → filter citations → cap unsupported severity** → merge duplicates → deterministic score |
-| `draft_letter` | Writes a negotiation email from the top issues (with a template fallback if the LLM fails) |
-
-Each node can route to `END` on error, the whole run has a deadline, and failure of a single category degrades gracefully instead of failing the job.
-
----
-
-## Engineering Highlights
-
-### 1. Grounding and hallucination control
-LLMs invent quotes and citations. Leazard does not trust model output blindly:
-
-- **Quote verification** — every `lease_quote` is whitespace-normalised and must appear *verbatim* in the extracted lease text, or it is dropped.
-- **Citation relevance filter** — the model cites retrieved chunks by number (`[1]`, `[2]`); each citation is kept only if it shares enough content words with the flagged clause (or is within a configurable vector distance).
-- **Evidence-gated severity** — a finding above "Low" with no surviving citation, or one the model marks as uncertain, is automatically capped at "Low".
-- **Market-norms context** — region-specific guidance (e.g. "a 21-day deposit return clause is compliant") reduces false alarms on standard clauses, while legal citations still come only from the law index.
-
-### 2. Deterministic, explainable scoring
-The model chooses severities; the **score is computed in code**: weights sorted most-severe-first, discounted by `decay^i`, squashed with `10·(1 − e^(−total/scale))`, then rule-based floors and caps (e.g. *two or more High findings ⇒ High*). Same flags → same score, always. Weights and thresholds are configurable by environment variable.
-
-### 3. Evaluation
-- **82 offline tests** (pytest) covering the agent nodes, scoring, quote/citation logic, API, auth, job lifecycle and the indexer — the LLM is mocked, so they run in ~13 s with no API cost.
-- **Live golden test** (`pytest -m live`) runs the real model and law index on a sample San Francisco lease multiple times and asserts:
-  - the risk label stays Low/Moderate with no High findings (no false alarms on a fair lease),
-  - standard clauses (deposit, 21-day return, entry notice, insurance…) are not over-flagged,
-  - the reported score matches the deterministic formula,
-  - and it reports score **standard deviation and range** across runs to track LLM non-determinism.
-
-### 4. RAG pipeline
-- Law PDFs → `pdfplumber` → `RecursiveCharacterTextSplitter` (1200 / 200 overlap) → `text-embedding-3-small` → **FAISS**.
-- The index is rebuilt only when it must be: a **content-hash fingerprint** (file bytes + embedding model + chunk settings) means re-deploys and fresh clones reuse the existing index instead of paying to re-embed.
-- Retrieved chunks are labelled `[n] source page=…`, and a context budget ensures only citations that actually reached the model can be referenced.
-
-### 5. Production-minded backend
-- **Async jobs**: `POST /jobs` returns immediately; a bounded in-process worker pool runs the agent; `GET /jobs/{id}` reports step and progress. Per-user and global concurrency limits, a hard timeout, and jobs interrupted by a restart are marked as failed on startup.
-- **Auth**: JWT (HS256, expiring) + bcrypt password hashing; every record and PDF is scoped to its owner.
-- **Input safety**: PDF magic-byte check, streamed upload with size limit, scanned-PDF detection, path-traversal-proof file IDs.
-- **Privacy**: exception logging records only type and stack frames — never lease content or secrets.
-
-### 6. Containerization and deployment
-- Multi-stage Dockerfile: dependencies exported from `poetry.lock` **with hash verification**, no build tools or Poetry in the runtime image.
-- Runs as **non-root (UID 10001)** with a **read-only root filesystem**, all Linux capabilities dropped, exec-form entrypoint for graceful shutdown.
-- Required secrets are checked at startup with a clear error, before any paid API call.
-- Health checks, a single persistent volume for DB / uploads / index, and ready-made **Fly.io** and **Render** configs.
-
-**Measured** (local Docker, Apple Silicon):
-
-| Metric | Value |
-| --- | --- |
-| Image size | 719 MB on disk / 155 MB compressed |
-| First start (builds the law index) | ~20 s |
-| Restart (index reused) | ~1 s to healthy |
-| Memory | ~130 MB idle, ~550 MB during an analysis |
-| End-to-end analysis of a sample lease | ~21 s |
-
----
-
-## Project Structure
-
-```text
-leazard/
-├── main.py                 # FastAPI app: auth, uploads, history, background jobs
-├── agent.py                # LangGraph agent, grounding checks, scoring
-├── auth.py                 # JWT + bcrypt
-├── db.py                   # SQLAlchemy models, additive migrations
-├── rag/
-│   ├── indexer.py          # PDF → chunks → embeddings → FAISS (content-hash cache)
-│   ├── retriever.py        # Top-k retrieval with traceable citations
-│   └── market_norms.md     # Region guidance injected into prompts
-├── utils/extract_pdf.py    # Text extraction + scanned-PDF detection
-├── data/law/               # California / San Francisco law corpus (PDF)
-├── ui/                     # Vanilla JS single-page app (no build step)
-├── tests/                  # Unit, API, job and live golden tests
-├── Dockerfile · docker-compose.yml · docker-entrypoint.sh · fly.toml
-└── pyproject.toml · poetry.lock
-```
-
----
-
-## Run Locally
+You need Docker and an OpenAI API key.
 
 ```bash
-git clone https://github.com/fardaevm/leazard.git
-cd leazard
+git clone https://github.com/fardaevm/leazard.git && cd leazard
+cp .env.example .env
+echo "OPENAI_API_KEY=sk-your-key-here" >> .env
+echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+docker compose up -d --build
+```
+
+Open **http://localhost:8000**. The first start builds the law index, which took about 18 seconds in our test. Later starts take about 1 second. To try it, upload [`tests/golden/sample_sf_lease_agreement.pdf`](tests/golden/sample_sf_lease_agreement.pdf) with ZIP `94110`.
+
+<details>
+<summary><b>Run without Docker</b></summary>
+
+Requires Python 3.12 and [Poetry](https://python-poetry.org/).
+
+```bash
 poetry install
-cp .env.example .env          # set OPENAI_API_KEY and SECRET_KEY (openssl rand -hex 32)
+cp .env.example .env   # then set OPENAI_API_KEY and SECRET_KEY (openssl rand -hex 32)
 poetry run uvicorn main:app --reload
 ```
 
-Open http://localhost:8000.
+</details>
 
-### Tests
+<details>
+<summary><b>Run the tests</b></summary>
 
 ```bash
 poetry install --with dev
-poetry run pytest                         # offline suite, LLM mocked
-poetry run pytest -m live -s tests/test_golden.py   # real model + law index (uses API credits)
+poetry run pytest                                    # 82 offline tests, LLM mocked, ~13 s
+poetry run pytest -m live -s tests/test_golden.py    # real model + law index, 3 runs, uses API credits
 ```
 
----
+</details>
 
-## Run with Docker
+## Screenshots
 
-Requires Docker with Compose v2. Put `OPENAI_API_KEY` and `SECRET_KEY` (≥32 chars, `openssl rand -hex 32`) in `.env` (see `.env.example`).
+All screenshots come from the real app, analyzing the sample lease in this repo. To regenerate them, run [`scripts/capture_screenshots.py`](scripts/capture_screenshots.py).
 
-```bash
-docker compose up -d --build        # build + run on http://localhost:8000
-docker compose logs -f              # first start embeds the law corpus (~20 s)
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/01-home.webp" alt="Home page with the sample lease PDF selected and ZIP code 94110 entered, above an Analyze my lease button."></td>
+    <td width="50%"><img src="docs/screenshots/02-analyzing.webp" alt="Analyzing page with a progress bar; Checking your ZIP and Reading your lease are done, Finding risk areas is in progress."></td>
+  </tr>
+  <tr>
+    <td><b>Home.</b> Choose a PDF and enter the rental's ZIP code.</td>
+    <td><b>Analyzing.</b> Live progress while the agent works.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/03-results.webp" alt="Results page for San Francisco, CA 94105: score 0.9 out of 10, Low risk, 2 to review, 11 standard, followed by the first flagged clause."></td>
+    <td><img src="docs/screenshots/04-flag.webp" alt="A Low severity flag about a 75 dollar late fee, with the verbatim lease quote and an expanded Why it matters section marked Uncertain."></td>
+  </tr>
+  <tr>
+    <td><b>Results.</b> Score, label, and a one-line summary.</td>
+    <td><b>A flag.</b> Verbatim quote and reasoning. With no supporting law citation, it is marked "Uncertain" and kept at Low.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/05-standard.webp" alt="Expanded Looks standard section listing normal clauses such as lease term, rent amount and security deposit, each with its lease quote."></td>
+    <td><img src="docs/screenshots/06-email.webp" alt="Questions before you sign card with a draft email to the landlord containing placeholders and a Copy email button."></td>
+  </tr>
+  <tr>
+    <td><b>Looks standard.</b> Normal clauses, listed so they don't alarm you.</td>
+    <td><b>Email.</b> A draft to send the landlord. This lease had no Medium or High issues, so it asks questions.</td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/screenshots/07-mobile-light.webp" width="260" alt="Results page on a 375 pixel wide phone screen in light mode.">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/07-mobile-dark.webp" width="260" alt="The same results page on a phone in dark mode.">
+  <br><b>Mobile (375 px), light and dark mode.</b> Dark mode follows the system setting.
+</p>
+
+## How it works
+
+**Request path.** Uploading returns right away. The analysis runs as a background job, and the page polls it for progress.
+
+```mermaid
+flowchart LR
+    UI[Browser] -->|POST /jobs| API[FastAPI]
+    API --> JOB[Background job]
+    JOB --> AG[LangGraph agent]
+    AG <--> RET[Law retriever]
+    RET --> IDX[(FAISS index)]
+    AG <--> LLM[OpenAI]
+    JOB -->|save result| DB[(SQLite)]
+    UI -->|GET /jobs/id, then /history/id| API
 ```
 
-Plain Docker: `docker build -t leazard .` then `docker run --env-file .env -p 8000:8000 -v leazard-data:/data leazard`.
+**The agent.** Five steps. Any of them can stop the run early.
 
-**Data** lives in the named volume `leazard-data`, mounted at `/data`: `leaze.db` (users, history, jobs), `uploads/` (PDFs), `rag_store/` (FAISS index, rebuilt only when the law PDFs or embedding settings change).
-
-```bash
-# Backup (stop first so SQLite is consistent)
-docker compose stop
-docker run --rm -v leazard-data:/data -v "$PWD":/backup debian:trixie-slim tar czf /backup/leazard-data.tgz -C /data .
-docker compose start
-# Reset everything (deletes all accounts, history and uploads)
-docker compose down -v
+```mermaid
+flowchart LR
+    Z[validate_zip] -->|outside region| OUT([END: out of scope])
+    Z --> E[extract_structured]
+    E --> C[discover_categories]
+    C --> R[analyze_risk]
+    R --> L[draft_letter]
+    L --> DONE([END: result])
+    E & C & R -->|error| ERR([END: error])
 ```
 
-The app runs as UID 10001 with a read-only root filesystem, and always with a **single** uvicorn worker (jobs run in-process).
+- **validate_zip** stops early if the ZIP is outside the supported region, before any AI calls.
+- **extract_structured** reads the lease into fields like rent, deposit and dates. Long leases are split into parts and read in parallel.
+- **discover_categories** lets the model pick which topics this lease needs checked. Nothing is hard-coded.
+- **analyze_risk** checks each topic in parallel. It retrieves relevant law, flags clauses, verifies quotes and citations, and computes the score.
+- **draft_letter** writes the email to the landlord. If the model fails, it falls back to a template.
+
+## How it was built
+
+<details>
+<summary><b>Why LangGraph instead of one big prompt</b></summary>
+
+A single prompt that "reads the lease and finds problems" is hard to test and fails all at once. With LangGraph, each step is a plain Python function with typed state. Each step can be unit-tested with a fake model and reports its own progress. A failure in one topic doesn't sink the whole run: if one category fails, it is skipped and counted, and the rest of the report still appears. The whole run also has a deadline (`JOB_TIMEOUT_S`).
+
+</details>
+
+<details>
+<summary><b>Grounding: quotes, citations, and capped findings</b></summary>
+
+Models invent quotes and citations, so the code checks every flag:
+
+1. **Quote check.** Whitespace is normalized, and the quote must appear word for word in the lease text. If it doesn't, it is removed.
+2. **Citation check.** Retrieved law chunks are numbered `[1]`, `[2]`, … in the prompt, and the model cites by number. A citation is kept only if it shares enough content words with the flagged clause.
+3. **Severity cap.** A finding above **Low** with no surviving citation, or one the model itself marks "Uncertain", is capped at **Low** and labeled "Uncertain".
+
+The flag in screenshot 4 is a real example: its citation didn't pass the check, so it stayed Low.
+
+</details>
+
+<details>
+<summary><b>Scoring: same flags, same score</b></summary>
+
+The model picks a severity for each clause (`OK`, `Low`, `Medium`, `High`). The score is computed in code:
+
+```text
+weights   OK=0, Low=0.5, Medium=1.5, High=3, sorted largest first
+total     = Σ weightᵢ × 0.85ⁱ
+score     = 10 × (1 − e^(−total / 10))
+then      no Medium/High → Low;  one High → at least Moderate;  two+ High → High
+```
+
+Real outputs of `score_flags`:
+
+| Flags | Score | Label |
+| --- | --- | --- |
+| 10 × OK | 0.0 | Low |
+| 2 × Low | 0.9 | Low |
+| 1 Medium, 2 Low | 2.0 | Low |
+| 1 High | 3.0 | Moderate |
+| 1 High, 2 Medium | 4.1 | Moderate |
+| 2 × High | 6.0 | High |
+
+Weights and thresholds can be set through environment variables (see [`.env.example`](.env.example)).
+
+</details>
+
+<details>
+<summary><b>RAG: the law index</b></summary>
+
+RAG (retrieval-augmented generation) means the model gets relevant law passages in its prompt instead of relying on memory.
+
+```text
+data/law/*.pdf → pdfplumber → 1,200-char chunks (200 overlap) → text-embedding-3-small → FAISS
+```
+
+The two San Francisco law PDFs produce 637 chunks. The index is saved to disk with a **fingerprint**: a SHA-256 hash of the PDF contents, the embedding model and the chunk settings. The index is rebuilt only when that fingerprint changes. Re-deploys and fresh clones reuse it instead of paying to embed the PDFs again.
+
+</details>
+
+<details>
+<summary><b>Evaluation: offline tests and the golden lease</b></summary>
+
+- **82 offline tests** (`poetry run pytest`, ~13 s) cover the agent steps, scoring, quote and citation checks, the API, auth, the job lifecycle, and the index fingerprint. The model is mocked, so the tests are free and don't depend on model output.
+- **Golden lease test** (`pytest -m live`). It runs the real model three times on [a fair sample lease](tests/golden/sample_sf_lease_agreement.pdf) and asserts:
+  - the label is Low or Moderate, with no High flags;
+  - standard clauses (deposit, 21-day return, entry notice, insurance, governing law) are not over-flagged;
+  - the stored score matches `score_flags`.
+
+  Latest run: scores **0.9, 1.2, 0.9** (standard deviation 0.14).
+
+</details>
+
+<details>
+<summary><b>Backend and security choices</b></summary>
+
+- **Async jobs.** `POST /jobs` returns a job ID right away, and a bounded thread pool runs the agent. There is one active job per user, a global limit, and a timeout. Jobs cut off by a restart are marked failed on the next start.
+- **Auth.** Passwords are hashed with bcrypt, and sessions use expiring JWTs. Every lease and PDF is scoped to its owner.
+- **Uploads.** The server checks the `%PDF-` header and streams the upload with a 10 MB limit. It detects scanned PDFs and uses random hex file IDs, so there is no path traversal.
+- **Privacy.** Errors are logged as type and stack only, never lease text or secrets.
+- **Container.** The image is multi-stage and dependencies are hash-checked from `poetry.lock`. It runs as non-root (UID 10001) with a read-only root filesystem and all capabilities dropped. If `OPENAI_API_KEY` or `SECRET_KEY` is missing, it fails fast with a clear message. It runs a single worker on purpose, because jobs run in-process.
+
+</details>
+
+<details>
+<summary><b>Calibration lesson: a fair lease once scored 10/10</b></summary>
+
+The first version ([`2b82e61`](https://github.com/fardaevm/leazard/commit/2b82e61)) had no "OK" severity. Every clause the model mentioned was at least Low (weight 1), and the score was `min(10, total / 2)`. A fair lease with 20 ordinary clauses scored **10/10**.
+
+Three changes fixed it:
+
+1. **An `OK` severity and a rubric** in the prompt: "a clause being present is not a risk."
+2. **Market-norms context** ([`rag/market_norms.md`](rag/market_norms.md)) tells the model what is typical in San Francisco. For example, a 21-day deposit return clause is compliant.
+3. **A capped, decaying score** with label rules. Today, 20 Low flags score 2.7, not 10.
+
+The golden lease test now guards against a regression.
+
+</details>
 
 ## Deploy
 
-### Fly.io
+<details>
+<summary><b>Fly.io</b></summary>
 
-`fly.toml` is included (1 machine, `shared-cpu-1x` / 1 GB, volume at `/data`, health check on `/health`).
+[`fly.toml`](fly.toml) is included: one `shared-cpu-1x` machine with 1 GB of memory, a volume at `/data`, and a `/health` check.
 
 ```bash
-fly launch --no-deploy --copy-config          # pick a unique app name / region
+fly launch --no-deploy --copy-config          # choose a unique app name and region
 fly volumes create leazard_data --size 1 --region sjc
 fly secrets set OPENAI_API_KEY=sk-... SECRET_KEY=$(openssl rand -hex 32)
 fly deploy --ha=false                         # one machine: SQLite + in-process jobs
 ```
 
-The container starts as root only to chown the root-owned volume, then drops to UID 10001.
+The container starts as root only to hand the volume to UID 10001, then drops privileges.
 
-### Render
+</details>
 
-Create a **Web Service** from the repo with runtime **Docker** (Dockerfile at repo root). Add a **Persistent Disk** mounted at `/data` (paid instance type, 1 GB is plenty), set `OPENAI_API_KEY` and `SECRET_KEY` as environment variables, and set the health check path to `/health`. Render injects `PORT`; the image honours it. Keep it to one instance: a disk-backed service can't scale out, and jobs are in-process.
+<details>
+<summary><b>Render</b></summary>
 
----
+1. Create a **Web Service** from the repo with runtime **Docker**.
+2. Add a **Persistent Disk** mounted at `/data`. This needs a paid instance; 1 GB is enough.
+3. Set `OPENAI_API_KEY` and `SECRET_KEY` as environment variables.
+4. Set the health check path to `/health`.
+5. Keep one instance. Render sets `PORT`, and the image uses it.
 
-## Design Decisions and Trade-offs
+</details>
 
-| Decision | Why | Trade-off / next step |
-| --- | --- | --- |
-| LangGraph instead of one big prompt | Each step is testable, observable and can fail independently | More orchestration code |
-| Score computed in code, not by the LLM | Reproducible, explainable, tunable without re-prompting | Severity labels still come from the model |
-| FAISS on disk instead of a vector DB | Zero infrastructure for a small, static corpus | Move to pgvector / Qdrant for multi-region corpora |
-| In-process job queue + SQLite | Simple to run and deploy on one small VM | Single worker; Redis/Celery + Postgres to scale out |
-| GPT-4o-mini at temperature 0 | Low cost and latency; variance tracked by the golden eval | Could A/B larger models on the eval set |
+<details>
+<summary><b>Data, backup and reset (Docker)</b></summary>
+
+Everything lives in the `leazard-data` volume at `/data`: `leaze.db` (accounts, history, jobs), `uploads/` (PDFs) and `rag_store/` (the index).
+
+```bash
+docker compose stop
+docker run --rm -v leazard-data:/data -v "$PWD":/backup debian:trixie-slim tar czf /backup/leazard-data.tgz -C /data .
+docker compose start
+docker compose down -v      # reset: deletes all accounts, history and uploads
+```
+
+</details>
 
 ## Roadmap
 
-- Larger labelled eval set (precision / recall of flagged clauses, citation accuracy)
-- LLM tracing and cost/latency dashboards (LangSmith or OpenTelemetry)
-- CI/CD with GitHub Actions: tests + image build on every PR
-- OCR for scanned leases; more jurisdictions beyond San Francisco
-- Hybrid retrieval (BM25 + vectors) and a re-ranker
+- A larger labeled set of leases, with precision and recall for flagged clauses
+- Tracing and cost/latency dashboards for LLM calls
+- CI with GitHub Actions: tests and an image build on every pull request
+- OCR for scanned leases
+- More cities and states
 
----
+<details>
+<summary><b>Project structure</b></summary>
 
-> Leazard is a portfolio project, not legal advice.
+```text
+leazard/
+├── main.py                 FastAPI app: auth, uploads, history, background jobs
+├── agent.py                LangGraph agent, grounding checks, scoring
+├── auth.py                 JWT + bcrypt
+├── db.py                   SQLAlchemy models
+├── rag/
+│   ├── indexer.py          PDF → chunks → embeddings → FAISS (fingerprint cache)
+│   ├── retriever.py        Top-k retrieval with numbered citations
+│   └── market_norms.md     Regional "what is typical" guidance
+├── utils/extract_pdf.py    PDF text extraction, scanned-PDF check
+├── data/law/               San Francisco law PDFs (the RAG corpus)
+├── ui/                     Vanilla JS single-page app
+├── tests/                  Offline tests + live golden lease test
+├── scripts/                Screenshot and GIF capture
+├── docs/                   README images
+└── Dockerfile, docker-compose.yml, fly.toml, pyproject.toml, poetry.lock
+```
 
-**Author:** Ali Fardaev — AI / ML Engineer · Data Scientist · MLOps · [GitHub](https://github.com/fardaevm/leazard)
+</details>
+
+## License
+
+No license file yet, so all rights are reserved by default. Open an issue if you'd like to reuse the code.
+
+## Author
+
+**Ali Fardaev**, AI / ML Engineer · [GitHub](https://github.com/fardaevm) · [Repository](https://github.com/fardaevm/leazard)
