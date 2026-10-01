@@ -7,27 +7,33 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import asyncio
 import json
+import logging
 import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Depends
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from utils.extract_pdf import extract_text_from_pdf
+from utils.extract_pdf import extract_text_from_pdf, looks_scanned, PDF_MAGIC
 from rag.indexer import ensure_index
 from agent import build_app
 from db import create_tables, get_db, User, LeaseRecord
 from auth import hash_password, verify_password, create_token, decode_token
 
+log = logging.getLogger("leazard.api")
+
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "uploads"))
 BASE_DIR   = Path(__file__).resolve().parent
+MAX_UPLOAD_MB     = float(os.getenv("MAX_UPLOAD_MB", "10"))
+MAX_UPLOAD_BYTES  = int(MAX_UPLOAD_MB * 1024 * 1024)
+UPLOAD_READ_CHUNK = 1024 * 1024
 
 app = FastAPI(title="Leaze")
 app.mount("/ui", StaticFiles(directory=str(BASE_DIR / "ui")), name="ui")
@@ -143,18 +149,41 @@ def get_lease_record(
 
 
 @app.get("/uploads/{file_id}")
-def get_pdf(file_id: str, user: User = Depends(get_current_user)):
+def get_pdf(
+    file_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     # Prevent path traversal — file_id must be hex UUID
-    if not all(c in "0123456789abcdefABCDEF" for c in file_id):
+    if not file_id or not all(c in "0123456789abcdefABCDEF" for c in file_id):
         raise HTTPException(400, "Invalid file ID.")
+    owned = db.query(LeaseRecord.id).filter(
+        LeaseRecord.file_id == file_id, LeaseRecord.user_id == user.id
+    ).first()
     path = UPLOAD_DIR / f"{file_id}.pdf"
-    if not path.exists():
+    if not owned or not path.exists():
         raise HTTPException(404, "PDF not found.")
     return FileResponse(path, media_type="application/pdf")
 
 
+async def _save_upload(lease: UploadFile, pdf_path: Path) -> None:
+    """Stream the upload to disk, enforcing MAX_UPLOAD_BYTES and the %PDF- header."""
+    size = 0
+    with pdf_path.open("wb") as out:
+        while chunk := await lease.read(UPLOAD_READ_CHUNK):
+            if size == 0 and not chunk.startswith(PDF_MAGIC):
+                raise HTTPException(400, "File is not a valid PDF.")
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_MB:g} MB limit.")
+            out.write(chunk)
+    if size == 0:
+        raise HTTPException(400, "Uploaded file is empty.")
+
+
 @app.post("/analyze")
 async def analyze(
+    request:  Request,
     lease:    UploadFile = File(...),
     zip_code: str        = Form(...),
     user: User           = Depends(get_current_user),
@@ -164,39 +193,58 @@ async def analyze(
         raise HTTPException(400, "ZIP must be 5 digits.")
     if not (lease.filename or "").lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF files are supported.")
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > MAX_UPLOAD_BYTES + 64 * 1024:
+        raise HTTPException(413, f"File exceeds the {MAX_UPLOAD_MB:g} MB limit.")
 
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_id  = uuid.uuid4().hex
     pdf_path = UPLOAD_DIR / f"{file_id}.pdf"
-    pdf_path.write_bytes(await lease.read())
 
-    text = extract_text_from_pdf(pdf_path)
-    if not text:
-        raise HTTPException(422, "Could not extract text from PDF.")
+    try:
+        await _save_upload(lease, pdf_path)
+        try:
+            text = extract_text_from_pdf(pdf_path)
+        except Exception:
+            raise HTTPException(422, "Could not read this PDF.")
+        if looks_scanned(text):
+            raise HTTPException(
+                422, "This looks like a scanned PDF. Scanned leases aren't supported yet."
+            )
 
-    loop  = asyncio.get_event_loop()
-    state = await loop.run_in_executor(
-        None, lambda: graph_app.invoke({"zip_code": zip_code, "lease_text": text})
-    )
+        loop  = asyncio.get_running_loop()
+        try:
+            state = await loop.run_in_executor(
+                None, lambda: graph_app.invoke({"zip_code": zip_code, "lease_text": text})
+            )
+        except Exception as e:
+            # Type only: exception messages/tracebacks may contain lease text.
+            log.error("Lease analysis failed: %s", type(e).__name__)
+            raise HTTPException(502, "Lease analysis failed. Please try again.")
+        if state.get("status") == "error":
+            raise HTTPException(502, state.get("message") or "Lease analysis failed.")
 
-    lease_json = state.get("lease_json") or {}
-    risk_json  = state.get("risk_json")  or {}
-    address    = (lease_json.get("address_or_city_if_present") or "").strip() or f"ZIP {zip_code}"
+        lease_json = state.get("lease_json") or {}
+        risk_json  = state.get("risk_json")  or {}
+        address    = (lease_json.get("address_or_city_if_present") or "").strip() or f"ZIP {zip_code}"
 
-    record = LeaseRecord(
-        user_id           = user.id,
-        file_id           = file_id,
-        original_filename = lease.filename,
-        address           = address,
-        zip_code          = zip_code,
-        risk_score        = risk_json.get("risk_score"),
-        lease_json        = json.dumps(lease_json),
-        risk_json         = json.dumps(risk_json),
-        letter_text       = state.get("letter_text"),
-    )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
+        record = LeaseRecord(
+            user_id           = user.id,
+            file_id           = file_id,
+            original_filename = lease.filename,
+            address           = address,
+            zip_code          = zip_code,
+            risk_score        = risk_json.get("risk_score"),
+            lease_json        = json.dumps(lease_json),
+            risk_json         = json.dumps(risk_json),
+            letter_text       = state.get("letter_text"),
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+    except BaseException:
+        pdf_path.unlink(missing_ok=True)
+        raise
 
     # Exclude raw lease_text from the response (can be megabytes)
     return JSONResponse({
