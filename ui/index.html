@@ -1,0 +1,565 @@
+<!-- ui/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Leaze</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/ui/css/style.css" />
+</head>
+<body>
+  <!-- AUTH VIEW -->
+  <div id="authView" class="authWrap hidden">
+    <div class="authCard">
+      <div class="authTop">
+        <div class="authLogoRow">
+          <div class="authLeft">
+            <div class="authMark">L</div>
+            <div>
+              <h1 class="authTitle">Leaze</h1>
+              <p class="authHint">Sign in to analyze leases and keep private history.</p>
+            </div>
+          </div>
+          <div class="pill good" id="authPill">Secure</div>
+        </div>
+      </div>
+
+      <div class="authBody">
+        <div class="authTabs">
+          <button class="tab active" id="tabLogin" type="button">Login</button>
+          <button class="tab" id="tabRegister" type="button">Create account</button>
+        </div>
+
+        <form id="authForm">
+          <div class="authRow">
+            <label>
+              Username
+              <input type="text" name="username" autocomplete="username" minlength="3" placeholder="yourname" required />
+            </label>
+            <label>
+              Password
+              <input type="password" name="password" autocomplete="current-password" minlength="6" placeholder="••••••••" required />
+            </label>
+          </div>
+
+          <div class="authActions">
+            <button class="btn-ghost" id="authClear" type="button">Clear</button>
+            <button class="btn-primary" id="authSubmit" type="submit">Login</button>
+          </div>
+
+          <div id="authAlert" class="hidden"></div>
+        </form>
+      </div>
+
+      <div class="authFooter">
+        Informational output only — not legal advice. Your history is visible only after sign-in.
+      </div>
+    </div>
+  </div>
+
+  <!-- APP VIEW -->
+  <div id="appView" class="appShell hidden">
+    <aside class="sidebar">
+      <div class="sideHeader">
+        <div class="brandRow">
+          <h1>Leaze</h1>
+          <div class="pill" id="statusPill">Idle</div>
+        </div>
+        <div class="brandSub">Lease analysis dashboard with saved history.</div>
+        <div class="sideActions">
+          <button class="btn-ghost small" id="refreshHistory" type="button">Refresh</button>
+          <button class="btn-ghost small" id="logoutBtn" type="button">Logout</button>
+        </div>
+      </div>
+
+      <div class="sideContent">
+        <div class="sideSectionTitle">History</div>
+        <div class="historyList" id="historyList"></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="topbar">
+        <div class="topbarLeft">
+          <p class="topbarTitle" id="dashTitle">Dashboard</p>
+          <p class="topbarSub" id="dashSub">Select a saved analysis or upload a new lease.</p>
+        </div>
+        <div class="status">
+          <div class="pill good" id="topPill">Signed in</div>
+        </div>
+      </div>
+
+      <div class="mainInner">
+        <div class="card">
+          <div class="section">
+            <form id="form">
+              <div class="grid">
+                <label>
+                  ZIP Code
+                  <input type="text" name="zip_code" maxlength="5" placeholder="94118" required />
+                </label>
+                <label>
+                  Lease PDF
+                  <input type="file" name="lease" accept="application/pdf" required />
+                </label>
+              </div>
+
+              <div style="height:12px"></div>
+
+              <div class="actions">
+                <button class="btn-ghost" id="clearBtn" type="button">Clear</button>
+                <button class="btn-primary" id="analyzeBtn" type="submit">Analyze</button>
+              </div>
+
+              <div style="height:10px"></div>
+              <div class="subnote">Informational output only, not legal advice.</div>
+            </form>
+          </div>
+        </div>
+
+        <div class="results" id="results">
+          <div class="card">
+            <div class="section">
+              <div class="hd">
+                <h2>Overview</h2>
+                <div class="subnote" id="metaLine"></div>
+              </div>
+              <div style="height:10px"></div>
+              <div class="kpis">
+                <div class="kpi">
+                  <div class="k">Risk score</div>
+                  <div class="v" id="riskScore">—</div>
+                  <div class="s" id="riskTag">—</div>
+                </div>
+                <div class="kpi">
+                  <div class="k">Rent</div>
+                  <div class="v" id="rent">—</div>
+                  <div class="s" id="term">—</div>
+                </div>
+                <div class="kpi">
+                  <div class="k">Deposit</div>
+                  <div class="v" id="deposit">—</div>
+                  <div class="s" id="notice">—</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="row2">
+            <div class="card">
+              <div class="section">
+                <div class="hd">
+                  <h2>Flags</h2>
+                  <div class="subnote" id="flagCount">—</div>
+                </div>
+                <div style="height:10px"></div>
+                <div class="list" id="flags"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="section">
+                <div class="hd">
+                  <h2>Move-out notice</h2>
+                  <div class="copyRow">
+                    <button class="btn-ghost small" id="copyLetter" type="button">Copy</button>
+                  </div>
+                </div>
+                <pre class="mono" id="letter">(no letter)</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="section">
+              <details>
+                <summary>Raw JSON (debug)</summary>
+                <div style="height:10px"></div>
+                <pre class="mono" id="raw"></pre>
+              </details>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const AUTH_KEY = "leaze_token";
+    let authMode = "login";
+    let currentLeaseId = null;
+
+    const authView = document.getElementById("authView");
+    const appView = document.getElementById("appView");
+
+    const authPill = document.getElementById("authPill");
+    const tabLogin = document.getElementById("tabLogin");
+    const tabRegister = document.getElementById("tabRegister");
+    const authForm = document.getElementById("authForm");
+    const authClear = document.getElementById("authClear");
+    const authSubmit = document.getElementById("authSubmit");
+    const authAlert = document.getElementById("authAlert");
+
+    const statusPill = document.getElementById("statusPill");
+    const topPill = document.getElementById("topPill");
+    const logoutBtn = document.getElementById("logoutBtn");
+    const refreshHistoryBtn = document.getElementById("refreshHistory");
+
+    const historyList = document.getElementById("historyList");
+    const dashTitle = document.getElementById("dashTitle");
+    const dashSub = document.getElementById("dashSub");
+
+    const form = document.getElementById("form");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+    const clearBtn = document.getElementById("clearBtn");
+
+    const metaLine = document.getElementById("metaLine");
+    const riskScore = document.getElementById("riskScore");
+    const riskTag = document.getElementById("riskTag");
+    const rent = document.getElementById("rent");
+    const deposit = document.getElementById("deposit");
+    const term = document.getElementById("term");
+    const notice = document.getElementById("notice");
+
+    const flagCount = document.getElementById("flagCount");
+    const flagsEl = document.getElementById("flags");
+
+    const letterEl = document.getElementById("letter");
+    const rawEl = document.getElementById("raw");
+    const copyLetterBtn = document.getElementById("copyLetter");
+
+    function token(){ return localStorage.getItem(AUTH_KEY) || ""; }
+
+    function setStatus(text, kind="") {
+      statusPill.textContent = text;
+      statusPill.className = "pill" + (kind ? " " + kind : "");
+    }
+    function setTop(text, kind=""){
+      topPill.textContent = text;
+      topPill.className = "pill" + (kind ? " " + kind : "");
+    }
+
+    function esc(s){
+      return (s ?? "").toString()
+        .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
+    }
+
+    function riskMeta(score){
+      if (!Number.isFinite(score)) return {label:"—", dot:"", chip:""};
+      if (score <= 2) return {label:"Low", dot:"good", chip:"good"};
+      if (score <= 5) return {label:"Moderate", dot:"warn", chip:"warn"};
+      if (score <= 7) return {label:"High", dot:"bad", chip:"bad"};
+      return {label:"Very High", dot:"bad", chip:"bad"};
+    }
+
+    function sevClass(sev){
+      const s = (sev||"").toLowerCase();
+      if (s.includes("high")) return "high";
+      if (s.includes("med")) return "medium";
+      if (s.includes("low")) return "low";
+      return "";
+    }
+
+    function showAuthAlert(msg, kind){
+      authAlert.className = (kind === "ok" ? "authOk" : "authErr");
+      authAlert.textContent = msg;
+      authAlert.classList.remove("hidden");
+    }
+    function hideAuthAlert(){
+      authAlert.className = "hidden";
+      authAlert.textContent = "";
+    }
+
+    async function apiFetch(path, opts={}){
+      const headers = new Headers(opts.headers || {});
+      const t = token();
+      if (t) headers.set("Authorization", "Bearer " + t);
+      if (!headers.has("Content-Type") && opts.body && !(opts.body instanceof FormData)) headers.set("Content-Type","application/json");
+      const res = await fetch(path, {...opts, headers});
+      let data = null;
+      try { data = await res.json(); } catch {}
+      if (!res.ok) throw new Error(data?.detail || data?.message || "Request failed");
+      return data;
+    }
+
+    function showAuth(){
+      appView.classList.add("hidden");
+      authView.classList.remove("hidden");
+      authPill.textContent = "Secure";
+      authPill.className = "pill good";
+      hideAuthAlert();
+      authForm.reset();
+      setAuthMode("login");
+    }
+
+    function showApp(){
+      authView.classList.add("hidden");
+      appView.classList.remove("hidden");
+      setStatus("Ready","good");
+      setTop("Signed in","good");
+    }
+
+    function setAuthMode(mode){
+      authMode = mode;
+      tabLogin.classList.toggle("active", mode === "login");
+      tabRegister.classList.toggle("active", mode === "register");
+      authSubmit.textContent = mode === "login" ? "Login" : "Create account";
+      const pass = authForm.querySelector('input[name="password"]');
+      pass.autocomplete = mode === "login" ? "current-password" : "new-password";
+      hideAuthAlert();
+    }
+
+    tabLogin.addEventListener("click", () => setAuthMode("login"));
+    tabRegister.addEventListener("click", () => setAuthMode("register"));
+    authClear.addEventListener("click", () => { authForm.reset(); hideAuthAlert(); });
+
+    authForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      hideAuthAlert();
+      authSubmit.disabled = true;
+      authPill.textContent = "Working…";
+      authPill.className = "pill warn";
+      try{
+        const fd = new FormData(authForm);
+        const body = { username: fd.get("username"), password: fd.get("password") };
+
+        if (authMode === "register") {
+          await apiFetch("/auth/register", { method:"POST", body: JSON.stringify(body) });
+          authPill.textContent = "Created";
+          authPill.className = "pill good";
+          showAuthAlert("Account created. Please log in.", "ok");
+          setAuthMode("login");
+          return;
+        }
+
+        const data = await apiFetch("/auth/login", { method:"POST", body: JSON.stringify(body) });
+        localStorage.setItem(AUTH_KEY, data.access_token);
+        authPill.textContent = "Signed in";
+        authPill.className = "pill good";
+        showApp();
+        await loadHistory({selectFirst:true});
+      }catch(err){
+        authPill.textContent = "Error";
+        authPill.className = "pill bad";
+        showAuthAlert("Error: " + (err?.message || String(err)), "err");
+      }finally{
+        authSubmit.disabled = false;
+      }
+    });
+
+    logoutBtn.addEventListener("click", () => {
+      localStorage.removeItem(AUTH_KEY);
+      currentLeaseId = null;
+      showAuth();
+    });
+
+    refreshHistoryBtn.addEventListener("click", async () => {
+      try{ await loadHistory({selectFirst:false}); }
+      catch(e){ setStatus("History error","bad"); }
+    });
+
+    function renderFlags(riskJson){
+      const arr = Array.isArray(riskJson?.flags) ? riskJson.flags : [];
+      flagCount.textContent = arr.length ? `${arr.length} item(s)` : "No issues flagged";
+      if (!arr.length) {
+        flagsEl.innerHTML = `<div class="subnote">No flags found.</div>`;
+        return;
+      }
+      flagsEl.innerHTML = arr.map(f => `
+        <div class="flag">
+          <div class="flagTop">
+            <div class="flagCat">${esc(f.category || "Flag")}</div>
+            <div class="badge ${sevClass(f.severity)}">${esc(f.severity || "—")}</div>
+          </div>
+          <div class="p"><b>Finding:</b> ${esc(f.finding || "")}</div>
+          <div class="p"><b>Why it matters:</b> ${esc(f.why_it_matters || "")}</div>
+          ${f.support ? `<div class="p"><b>Support:</b> <span class="mono" style="display:inline-block;padding:2px 8px;border-radius:10px;max-height:none">${esc(f.support)}</span></div>` : ``}
+        </div>
+      `).join("");
+    }
+
+    function clearDashboard(){
+      dashTitle.textContent = "Dashboard";
+      dashSub.textContent = "Select a saved analysis or upload a new lease.";
+      metaLine.textContent = "";
+      riskScore.textContent = "—";
+      riskTag.innerHTML = "—";
+      rent.textContent = "—";
+      deposit.textContent = "—";
+      term.textContent = "—";
+      notice.textContent = "—";
+      flagCount.textContent = "—";
+      flagsEl.innerHTML = `<div class="subnote">No analysis loaded.</div>`;
+      letterEl.textContent = "(no letter)";
+      rawEl.textContent = "";
+      setStatus("Ready","good");
+    }
+
+    function setLoading(on){
+      analyzeBtn.disabled = on;
+      analyzeBtn.textContent = on ? "Analyzing..." : "Analyze";
+      if (on) setStatus("Analyzing","warn");
+    }
+
+    copyLetterBtn.addEventListener("click", async () => {
+      const t = letterEl.textContent || "";
+      if (!t.trim()) return;
+      try {
+        await navigator.clipboard.writeText(t);
+        setStatus("Copied","good");
+        setTimeout(() => setStatus("Ready","good"), 900);
+      } catch {
+        setStatus("Copy failed","bad");
+      }
+    });
+
+    clearBtn.addEventListener("click", () => {
+      form.reset();
+      setStatus("Ready","good");
+    });
+
+    async function loadHistory({selectFirst=false}={}){
+      historyList.innerHTML = `<div class="subnote" style="padding:10px 12px">Loading…</div>`;
+      const items = await apiFetch("/history");
+      if (!Array.isArray(items) || !items.length){
+        historyList.innerHTML = `
+          <button class="histItem active" type="button" data-id="">
+            <div class="histTop">
+              <div class="histAddr">805 Leavenworth St.</div>
+              <span class="kchip warn">Example</span>
+            </div>
+            <div class="histMeta">
+              <span class="kchip">No history yet</span>
+              <span class="kchip">Upload to save</span>
+            </div>
+          </button>
+        `;
+        currentLeaseId = null;
+        clearDashboard();
+        return;
+      }
+
+      historyList.innerHTML = items.map(r => {
+        const score = Number(r.risk_score);
+        const rm = riskMeta(score);
+        const chip = Number.isFinite(score)
+          ? `<span class="kchip ${rm.chip}">Risk ${score.toFixed(1)}</span>`
+          : `<span class="kchip">Risk —</span>`;
+        const addr = (r.address || "Lease").trim();
+        const date = (r.created_at || "").slice(0,10);
+        return `
+          <button class="histItem" type="button" data-id="${esc(r.id)}">
+            <div class="histTop">
+              <div class="histAddr">${esc(addr)}</div>
+              ${chip}
+            </div>
+            <div class="histMeta">
+              <span class="kchip">ZIP ${esc(r.zip_code || "")}</span>
+              <span class="kchip">${esc(date || "")}</span>
+            </div>
+          </button>
+        `;
+      }).join("");
+
+      const buttons = [...historyList.querySelectorAll(".histItem")];
+      buttons.forEach(b => b.addEventListener("click", async () => {
+        const id = b.getAttribute("data-id");
+        if (!id) return;
+        await selectLease(Number(id));
+      }));
+
+      if (selectFirst){
+        await selectLease(Number(items[0].id));
+      } else if (currentLeaseId){
+        const exists = items.some(x => Number(x.id) === Number(currentLeaseId));
+        if (exists) markActive(currentLeaseId);
+      }
+    }
+
+    function markActive(id){
+      [...historyList.querySelectorAll(".histItem")].forEach(b => {
+        b.classList.toggle("active", Number(b.getAttribute("data-id")) === Number(id));
+      });
+    }
+
+    function renderRecord(data){
+      const lease = data?.lease_json || {};
+      const risk = data?.risk_json || {};
+      const score = Number(risk?.risk_score);
+
+      const addr = (data?.address || lease?.address_or_city_if_present || "Lease").trim();
+      dashTitle.textContent = addr || "Dashboard";
+      dashSub.textContent = `Saved analysis · ${data?.created_at ? data.created_at.slice(0,19).replace("T"," ") : ""}`;
+
+      const rm = riskMeta(score);
+      riskScore.textContent = Number.isFinite(score) ? score.toFixed(1) : "—";
+      riskTag.innerHTML = rm.label === "—" ? "—" : `<span class="tag"><span class="dot ${rm.dot}"></span>${rm.label}</span>`;
+
+      rent.textContent = lease?.rent_amount || "—";
+      deposit.textContent = lease?.deposit_amount || "—";
+      term.textContent = `Term: ${lease?.start_date || "?"} → ${lease?.end_date || "?"}`;
+      notice.textContent = `Notice: ${lease?.notice_period_days ?? "?"} days`;
+
+      metaLine.textContent = `ZIP ${data?.zip_code || ""} · Record ${data?.id || ""} · File ${data?.file_id || ""}`;
+      renderFlags(risk);
+
+      letterEl.textContent = data?.letter_text || "(no letter)";
+      rawEl.textContent = JSON.stringify(data, null, 2);
+
+      setStatus("Ready","good");
+    }
+
+    async function selectLease(id){
+      try{
+        currentLeaseId = id;
+        markActive(id);
+        setStatus("Loading","warn");
+        const rec = await apiFetch("/history/" + id);
+        renderRecord(rec);
+      }catch(err){
+        setStatus("Error","bad");
+        flagsEl.innerHTML = `<div class="subnote">Error: ${esc(err?.message || String(err))}</div>`;
+      }
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      setLoading(true);
+      try {
+        const formData = new FormData(form);
+        const res = await fetch("/analyze", {
+          method:"POST",
+          body: formData,
+          headers: { "Authorization": "Bearer " + token() }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.detail || "Request failed");
+
+        await loadHistory({selectFirst:false});
+        if (data?.id) await selectLease(Number(data.id));
+        setTop("Saved","good");
+        setTimeout(() => setTop("Signed in","good"), 900);
+      } catch (err) {
+        setStatus("Error","bad");
+        flagsEl.innerHTML = `<div class="subnote">Error: ${esc(err?.message || String(err))}</div>`;
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    (async function boot(){
+      clearDashboard();
+      const t = token();
+      if (!t) return showAuth();
+      try{
+        showApp();
+        await loadHistory({selectFirst:true});
+      }catch(err){
+        localStorage.removeItem(AUTH_KEY);
+        showAuth();
+        showAuthAlert("Session expired. Please log in again.", "err");
+      }
+    })();
+  </script>
+</body>
+</html>

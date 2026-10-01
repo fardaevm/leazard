@@ -1,0 +1,48 @@
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# macOS
+.DS_Store
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+
+# Local uploaded files
+uploads/
+
+# Local/generated data
+data/
+rag_store/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# ML/model artifacts
+models/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
