@@ -91,44 +91,6 @@ poetry run pytest -m live -s tests/test_golden.py    # real model + law index, 3
 
 </details>
 
-## Screenshots
-
-All screenshots come from the real app, analyzing the sample lease in this repo. To regenerate them, run [`scripts/capture_screenshots.py`](scripts/capture_screenshots.py).
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/screenshots/01-home.webp" alt="Home page with the sample lease PDF selected and ZIP code 94110 entered, above an Analyze my lease button."></td>
-    <td width="50%"><img src="docs/screenshots/02-analyzing.webp" alt="Analyzing page with a progress bar; Checking your ZIP and Reading your lease are done, Finding risk areas is in progress."></td>
-  </tr>
-  <tr>
-    <td><b>Home.</b> Choose a PDF and enter the rental's ZIP code.</td>
-    <td><b>Analyzing.</b> Live progress while the agent works.</td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/03-results.webp" alt="Results page for San Francisco, CA 94105: score 0.9 out of 10, Low risk, 2 to review, 11 standard, followed by the first flagged clause."></td>
-    <td><img src="docs/screenshots/04-flag.webp" alt="A Low severity flag about a 75 dollar late fee, with the verbatim lease quote and an expanded Why it matters section marked Uncertain."></td>
-  </tr>
-  <tr>
-    <td><b>Results.</b> Score, label, and a one-line summary.</td>
-    <td><b>A flag.</b> Verbatim quote and reasoning. With no supporting law citation, it is marked "Uncertain" and kept at Low.</td>
-  </tr>
-  <tr>
-    <td><img src="docs/screenshots/05-standard.webp" alt="Expanded Looks standard section listing normal clauses such as lease term, rent amount and security deposit, each with its lease quote."></td>
-    <td><img src="docs/screenshots/06-email.webp" alt="Questions before you sign card with a draft email to the landlord containing placeholders and a Copy email button."></td>
-  </tr>
-  <tr>
-    <td><b>Looks standard.</b> Normal clauses, listed so they don't alarm you.</td>
-    <td><b>Email.</b> A draft to send the landlord. This lease had no Medium or High issues, so it asks questions.</td>
-  </tr>
-</table>
-
-<p align="center">
-  <img src="docs/screenshots/07-mobile-light.webp" width="260" alt="Results page on a 375 pixel wide phone screen in light mode.">
-  &nbsp;&nbsp;
-  <img src="docs/screenshots/07-mobile-dark.webp" width="260" alt="The same results page on a phone in dark mode.">
-  <br><b>Mobile (375 px), light and dark mode.</b> Dark mode follows the system setting.
-</p>
-
 ## How it works
 
 **Request path.** Uploading returns right away. The analysis runs as a background job, and the page polls it for progress.
