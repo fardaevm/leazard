@@ -1,5 +1,5 @@
 # rag/indexer.py  (Docling option)
-import os, hashlib
+import os, sys, hashlib
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,11 +25,11 @@ def _iter_pdfs(law_dir: Path) -> List[Path]:
     return sorted([p for p in law_dir.glob("*.pdf") if p.is_file()])
 
 def _fingerprint(pdfs: List[Path]) -> str:
+    # Content-based (not mtime) so a fresh clone / image rebuild of the same corpus reuses the index.
     h = hashlib.sha256()
     h.update(f"{EMBED_MODEL}|{CHUNK_SIZE}|{CHUNK_OVERLAP}".encode())
     for p in pdfs:
-        st = p.stat()
-        h.update(f"{p.name}|{st.st_size}|{int(st.st_mtime)}".encode())
+        h.update(f"{p.name}|{hashlib.sha256(p.read_bytes()).hexdigest()}".encode())
     return h.hexdigest()
 
 def _meta_path(index_dir: Path) -> Path:
@@ -81,6 +81,7 @@ def ensure_index() -> Path:
     if (out_dir / "index.faiss").exists() and (out_dir / "index.pkl").exists() and _read_meta(out_dir) == fp:
         return out_dir
 
+    print(f"[rag] Building index from {len(pdfs)} PDF(s) in {LAW_DIR} -> {out_dir} ...", file=sys.stderr, flush=True)
     docs: List[Document] = []
     for p in pdfs:
         docs.extend(_pdf_to_docs(p))
@@ -92,4 +93,5 @@ def ensure_index() -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     vs.save_local(str(out_dir))
     _write_meta(out_dir, fp)
+    print(f"[rag] Index built: {len(chunks)} chunks.", file=sys.stderr, flush=True)
     return out_dir

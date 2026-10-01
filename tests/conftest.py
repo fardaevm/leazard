@@ -1,6 +1,8 @@
 import os
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TMP / 'test.db'}"
 os.environ["UPLOAD_DIR"] = str(_TMP / "uploads")
 os.environ["MAX_UPLOAD_MB"] = "1"
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-used")
+os.environ["MAX_CONCURRENT_JOBS"] = "3"
+os.environ["JOB_TIMEOUT_S"] = "30"
 
 
 def make_pdf(text_lines: list[str]) -> bytes:
@@ -46,23 +50,49 @@ def make_pdf(text_lines: list[str]) -> bytes:
 
 
 class FakeGraph:
+    """Mimics graph_app.stream(stream_mode=["updates", "custom"]) without any LLM calls.
+
+    status: "ok" | "error" (fails at `fail_at`) | "out_of_scope".
+    gate: optional threading.Event the run waits on before starting (to hold a job "running").
+    """
+
     def __init__(self):
         self.calls = 0
         self.raise_exc: Exception | None = None
         self.status = "ok"
+        self.fail_at = "discover_categories"
+        self.categories = 3
+        self.category_delay = 0.0
+        self.gate: threading.Event | None = None
 
-    def invoke(self, state):
+    def stream(self, state, config=None, stream_mode=None):
         self.calls += 1
+        if self.gate is not None:
+            self.gate.wait(10)
         if self.raise_exc:
             raise self.raise_exc
-        return {
-            **state,
-            "status": self.status,
-            "message": "boom" if self.status == "error" else None,
-            "lease_json": {"address_or_city_if_present": "SF"},
-            "risk_json": {"risk_score": 1.0, "risk_label": "Low", "flags": [], "recommendations": []},
-            "letter_text": "Dear [LANDLORD_NAME]",
-        }
+        if self.status == "out_of_scope":
+            yield "updates", {"validate_zip": {"status": "out_of_scope",
+                                               "message": "Out of scope region."}}
+            return
+        updates = [
+            ("validate_zip",        {"status": "ok"}),
+            ("extract_structured",  {"lease_json": {"address_or_city_if_present": "SF"}}),
+            ("discover_categories", {"categories": [{"title": f"c{i}", "terms": []}
+                                                    for i in range(self.categories)]}),
+            ("analyze_risk",        {"risk_json": {"risk_score": 1.0, "risk_label": "Low", "flags": [],
+                                                   "recommendations": [], "skipped_categories": 0}}),
+            ("draft_letter",        {"letter_text": "Dear [LANDLORD_NAME]"}),
+        ]
+        for node, update in updates:
+            if self.status == "error" and node == self.fail_at:
+                yield "updates", {node: {"status": "error", "message": "boom"}}
+                return
+            if node == "analyze_risk":
+                for i in range(self.categories):
+                    time.sleep(self.category_delay)
+                    yield "custom", {"categories_done": i + 1, "categories_total": self.categories}
+            yield "updates", {node: update}
 
 
 @pytest.fixture(scope="session")

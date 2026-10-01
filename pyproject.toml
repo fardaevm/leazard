@@ -28,6 +28,10 @@ package-mode = false
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.pytest.ini_options]
+markers = ["live: calls the real LLM and law index; run with `pytest -m live`"]
+addopts = "-m 'not live'"
+
 [dependency-groups]
 dev = [
     "ruff (>=0.15.1,<0.16.0)",

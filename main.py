@@ -1,5 +1,17 @@
 # main.py
 import os
+import sys
+
+from dotenv import load_dotenv
+load_dotenv()
+
+# Fail fast, before the (slow, paid) RAG index build. Never print the values.
+_missing = [k for k in ("OPENAI_API_KEY", "SECRET_KEY") if not os.getenv(k, "").strip()]
+if _missing:
+    sys.exit(f"Missing required environment variable(s): {', '.join(_missing)}. See .env.example.")
+if len(os.environ["SECRET_KEY"].strip()) < 32:
+    sys.exit("SECRET_KEY must be at least 32 characters (e.g. `openssl rand -hex 32`).")
+
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -8,11 +20,14 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 import asyncio
 import json
 import logging
+import threading
+import time
+import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
-
-from dotenv import load_dotenv
-load_dotenv()
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Depends, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -23,8 +38,11 @@ from sqlalchemy.orm import Session
 
 from utils.extract_pdf import extract_text_from_pdf, looks_scanned, PDF_MAGIC
 from rag.indexer import ensure_index
-from agent import build_app
-from db import create_tables, get_db, User, LeaseRecord
+from agent import build_app, run_graph, PipelineError, ProgressFn, JOB_STEPS
+from db import (
+    create_tables, get_db, mark_interrupted_jobs, SessionLocal,
+    User, LeaseRecord, Job, JOB_ACTIVE_STATUSES,
+)
 from auth import hash_password, verify_password, create_token, decode_token
 
 log = logging.getLogger("leazard.api")
@@ -34,13 +52,29 @@ BASE_DIR   = Path(__file__).resolve().parent
 MAX_UPLOAD_MB     = float(os.getenv("MAX_UPLOAD_MB", "10"))
 MAX_UPLOAD_BYTES  = int(MAX_UPLOAD_MB * 1024 * 1024)
 UPLOAD_READ_CHUNK = 1024 * 1024
+MAX_CONCURRENT_JOBS = max(int(os.getenv("MAX_CONCURRENT_JOBS", "3")), 1)
+JOB_TIMEOUT_S       = float(os.getenv("JOB_TIMEOUT_S", "240"))
 
-app = FastAPI(title="Leaze")
+# Owned by the app (not per-request), so jobs outlive the POST /jobs request.
+_job_executor   = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS, thread_name_prefix="leazard-job")
+_job_admit_lock = threading.Lock()
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    yield
+    # Cancelled queued jobs stay "queued" in the DB and are failed on next startup.
+    _job_executor.shutdown(wait=False, cancel_futures=True)
+
+
+app = FastAPI(title="Leaze", lifespan=_lifespan)
 app.mount("/ui", StaticFiles(directory=str(BASE_DIR / "ui")), name="ui")
 
 # Startup
 ensure_index()
 create_tables()
+if (_stuck := mark_interrupted_jobs()):
+    log.warning("Marked %d interrupted job(s) as failed", _stuck)
 graph_app = build_app()
 
 security = HTTPBearer()
@@ -181,14 +215,8 @@ async def _save_upload(lease: UploadFile, pdf_path: Path) -> None:
         raise HTTPException(400, "Uploaded file is empty.")
 
 
-@app.post("/analyze")
-async def analyze(
-    request:  Request,
-    lease:    UploadFile = File(...),
-    zip_code: str        = Form(...),
-    user: User           = Depends(get_current_user),
-    db:   Session        = Depends(get_db),
-):
+async def _validate_and_save(request: Request, lease: UploadFile, zip_code: str) -> str:
+    """Validate the form + upload and store it. Returns the new file_id; nothing is left on failure."""
     if not (zip_code.isdigit() and len(zip_code) == 5):
         raise HTTPException(400, "ZIP must be 5 digits.")
     if not (lease.filename or "").lower().endswith(".pdf"):
@@ -200,38 +228,57 @@ async def analyze(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     file_id  = uuid.uuid4().hex
     pdf_path = UPLOAD_DIR / f"{file_id}.pdf"
-
     try:
         await _save_upload(lease, pdf_path)
+    except BaseException:
+        pdf_path.unlink(missing_ok=True)
+        raise
+    return file_id
+
+
+def _log_failure(what: str, e: BaseException) -> None:
+    # Type + stack frames only: exception messages may contain lease text.
+    log.error("%s: %s\n%s", what, type(e).__name__, "".join(traceback.format_tb(e.__traceback__)))
+
+
+def run_pipeline(
+    file_id: str,
+    zip_code: str,
+    user_id: int,
+    filename: str | None,
+    on_progress: ProgressFn | None = None,
+    deadline: float | None = None,
+) -> tuple[LeaseRecord, dict]:
+    """Shared by /analyze and jobs: PDF text → graph → persisted LeaseRecord.
+
+    Raises PipelineError with a user-safe message; the uploaded PDF is deleted on any failure.
+    Uses its own DB session so it is safe to call from worker threads.
+    """
+    pdf_path = UPLOAD_DIR / f"{file_id}.pdf"
+    try:
         try:
             text = extract_text_from_pdf(pdf_path)
         except Exception:
-            raise HTTPException(422, "Could not read this PDF.")
+            raise PipelineError("extraction_failed", "Could not read this PDF.", http_status=422)
         if looks_scanned(text):
-            raise HTTPException(
-                422, "This looks like a scanned PDF. Scanned leases aren't supported yet."
-            )
+            raise PipelineError("scanned_pdf", http_status=422)
 
-        loop  = asyncio.get_running_loop()
         try:
-            state = await loop.run_in_executor(
-                None, lambda: graph_app.invoke({"zip_code": zip_code, "lease_text": text})
-            )
+            state = run_graph(graph_app, {"zip_code": zip_code, "lease_text": text}, on_progress, deadline)
+        except PipelineError:
+            raise
         except Exception as e:
-            # Type only: exception messages/tracebacks may contain lease text.
-            log.error("Lease analysis failed: %s", type(e).__name__)
-            raise HTTPException(502, "Lease analysis failed. Please try again.")
-        if state.get("status") == "error":
-            raise HTTPException(502, state.get("message") or "Lease analysis failed.")
+            _log_failure("Lease analysis failed", e)
+            raise PipelineError("analysis_failed")
 
         lease_json = state.get("lease_json") or {}
         risk_json  = state.get("risk_json")  or {}
         address    = (lease_json.get("address_or_city_if_present") or "").strip() or f"ZIP {zip_code}"
 
         record = LeaseRecord(
-            user_id           = user.id,
+            user_id           = user_id,
             file_id           = file_id,
-            original_filename = lease.filename,
+            original_filename = filename,
             address           = address,
             zip_code          = zip_code,
             risk_score        = risk_json.get("risk_score"),
@@ -239,12 +286,36 @@ async def analyze(
             risk_json         = json.dumps(risk_json),
             letter_text       = state.get("letter_text"),
         )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
+        with SessionLocal(expire_on_commit=False) as db:
+            db.add(record)
+            db.commit()
     except BaseException:
         pdf_path.unlink(missing_ok=True)
         raise
+    return record, state
+
+
+@app.post("/analyze")
+async def analyze(
+    request:  Request,
+    lease:    UploadFile = File(...),
+    zip_code: str        = Form(...),
+    user: User           = Depends(get_current_user),
+):
+    file_id = await _validate_and_save(request, lease, zip_code)
+    loop = asyncio.get_running_loop()
+    try:
+        record, state = await loop.run_in_executor(
+            None, lambda: run_pipeline(file_id, zip_code, user.id, lease.filename)
+        )
+    except PipelineError as e:
+        if e.code == "out_of_scope":
+            return JSONResponse({
+                "id": None, "file_id": None, "zip_code": zip_code,
+                "status": "out_of_scope", "message": e.message,
+                "lease_json": {}, "risk_json": {}, "letter_text": None,
+            })
+        raise HTTPException(e.http_status, e.message)
 
     # Exclude raw lease_text from the response (can be megabytes)
     return JSONResponse({
@@ -253,7 +324,91 @@ async def analyze(
         "zip_code":    zip_code,
         "status":      state.get("status"),
         "message":     state.get("message"),
-        "lease_json":  lease_json,
-        "risk_json":   risk_json,
-        "letter_text": state.get("letter_text"),
+        "lease_json":  json.loads(record.lease_json),
+        "risk_json":   json.loads(record.risk_json),
+        "letter_text": record.letter_text,
     })
+
+
+# ── Background jobs ───────────────────────────────────────────────────────────
+
+def _update_job(job_id: str, **fields) -> None:
+    with SessionLocal() as db:
+        db.query(Job).filter(Job.id == job_id).update(
+            {**fields, "updated_at": datetime.utcnow()}, synchronize_session=False
+        )
+        db.commit()
+
+
+def _job_limit_error(db: Session, user_id: int) -> str | None:
+    active = db.query(Job).filter(Job.status.in_(JOB_ACTIVE_STATUSES))
+    if active.filter(Job.user_id == user_id).first():
+        return "You already have a lease analysis in progress. Please wait for it to finish."
+    if active.count() >= MAX_CONCURRENT_JOBS:
+        return "The server is busy analyzing other leases. Please try again in a minute."
+    return None
+
+
+def _run_job(job_id: str, file_id: str, zip_code: str, user_id: int, filename: str | None) -> None:
+    deadline = time.monotonic() + JOB_TIMEOUT_S
+    best = 0
+
+    def on_progress(label: str, pct: int) -> None:
+        nonlocal best
+        best = max(best, min(int(pct), 99))
+        _update_job(job_id, step=label, progress=best)
+
+    try:
+        _update_job(job_id, status="running")
+        record, _ = run_pipeline(file_id, zip_code, user_id, filename, on_progress, deadline)
+        _update_job(job_id, status="done", step=JOB_STEPS["done"]["label"],
+                    progress=JOB_STEPS["done"]["progress"], lease_record_id=record.id)
+    except PipelineError as e:
+        log.warning("Job %s failed: %s", job_id, e.code)
+        _update_job(job_id, status="error", error_code=e.code, error_message=e.message)
+    except Exception as e:
+        _log_failure(f"Job {job_id} crashed", e)
+        _update_job(job_id, status="error", error_code="analysis_failed",
+                    error_message=PipelineError("analysis_failed").message)
+
+
+@app.post("/jobs", status_code=202)
+async def create_job(
+    request:  Request,
+    lease:    UploadFile = File(...),
+    zip_code: str        = Form(...),
+    user: User           = Depends(get_current_user),
+    db:   Session        = Depends(get_db),
+):
+    if (msg := _job_limit_error(db, user.id)):
+        raise HTTPException(429, msg)
+    file_id = await _validate_and_save(request, lease, zip_code)
+
+    with _job_admit_lock:
+        with SessionLocal() as jdb:
+            if (msg := _job_limit_error(jdb, user.id)):
+                (UPLOAD_DIR / f"{file_id}.pdf").unlink(missing_ok=True)
+                raise HTTPException(429, msg)
+            job = Job(user_id=user.id, status="queued",
+                      step=JOB_STEPS["queued"]["label"], progress=JOB_STEPS["queued"]["progress"])
+            jdb.add(job)
+            jdb.commit()
+            job_id = job.id
+
+    _job_executor.submit(_run_job, job_id, file_id, zip_code, user.id, lease.filename)
+    return JSONResponse({"job_id": job_id}, status_code=202)
+
+
+@app.get("/jobs/{job_id}")
+def get_job(job_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    job = db.query(Job).filter(Job.id == job_id, Job.user_id == user.id).first()
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    return {
+        "status":        job.status,
+        "step":          job.step,
+        "progress":      job.progress,
+        "error_code":    job.error_code,
+        "error_message": job.error_message,
+        "lease_id":      job.lease_record_id,
+    }

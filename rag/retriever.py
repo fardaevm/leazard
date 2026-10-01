@@ -86,6 +86,8 @@ class LawRetriever:
                 "page":        c.page,
                 "section":     c.section,
                 "url":         c.url,
+                "score":       c.score,
+                "text":        c.text,
             })
             pos += len(part) + 2
         return ctx, refs

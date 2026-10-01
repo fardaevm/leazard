@@ -28,8 +28,10 @@ env/
 # Local uploaded files
 uploads/
 
-# Local/generated data
-data/
+# Local/generated data (the law corpus in data/law is committed)
+data/*
+!data/law/
+!data/law/*.pdf
 rag_store/
 
 # Logs
