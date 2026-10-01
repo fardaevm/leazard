@@ -1,0 +1,35 @@
+# Fly.io config. Before the first deploy: set `app`, create the volume and secrets (see README "Deploy").
+app = "leazard"            # must be globally unique
+primary_region = "sjc"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+
+# One machine + one volume: SQLite, uploads and the RAG index all live in /data.
+[mounts]
+  source = "leazard_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    grace_period = "120s"  # first boot embeds the law corpus
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+    path = "/health"
+
+kill_timeout = 30
+
+# Measured: ~130 MB idle, ~550 MB during an analysis. 512 MB is too tight with 3 concurrent jobs.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

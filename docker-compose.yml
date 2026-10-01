@@ -1,0 +1,35 @@
+# Local dev / simple self-hosting. Data lives in the named volume `leazard-data` (/data).
+services:
+  leazard:
+    build: .
+    image: leazard:local
+    env_file: .env
+    # Override any relative paths in .env so data lands in the volume, not the read-only image.
+    environment:
+      DATABASE_URL: sqlite:////data/leaze.db
+      UPLOAD_DIR: /data/uploads
+      RAG_STORE_DIR: /data/rag_store
+      LAW_DIR: /app/data/law
+    user: "10001:10001"          # run non-root from the start; the volume is pre-owned by 10001
+    ports:
+      - "8000:8000"
+    volumes:
+      - leazard-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+
+volumes:
+  leazard-data:
+    name: leazard-data   # stable name for backups (not prefixed by the project dir)

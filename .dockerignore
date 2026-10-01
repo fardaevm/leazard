@@ -1,0 +1,34 @@
+# Allow-list: only what the image needs reaches the build context.
+*
+!Dockerfile
+!docker-entrypoint.sh
+!pyproject.toml
+!poetry.lock
+!main.py
+!agent.py
+!db.py
+!auth.py
+!rag/
+!utils/
+!ui/
+!data/law/*.pdf
+
+# Belt and braces: never send these, even if a pattern above changes.
+.git
+.env
+.env.*
+uploads/
+rag_store/
+**/rag_store/
+*.db
+*.db-*
+*.sqlite*
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store
+.venv/
+tests/
+.pytest_cache/
+.ruff_cache/
+.cursorignore
+node_modules/
