@@ -308,4 +308,4 @@ No license file yet, so all rights are reserved by default. Open an issue if you
 
 ## Author
 
-**Ali Fardaev**, AI / ML Engineer · [GitHub](https://github.com/fardaevm) · [Repository](https://github.com/fardaevm/leazard)
+**Ali Fardaev**
