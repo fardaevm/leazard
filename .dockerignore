@@ -30,5 +30,4 @@ rag_store/
 tests/
 .pytest_cache/
 .ruff_cache/
-.cursorignore
 node_modules/
